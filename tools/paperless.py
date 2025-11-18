@@ -258,6 +258,7 @@ class Tools:
                 )
             return f"Error searching documents: {str(e)}"
 
+
     async def get_document_by_id(
         self,
         document_id: int = Field(
@@ -678,3 +679,282 @@ class Tools:
         except Exception as e:
             print(f"Error retrieving content for document {document_id}: {e}")
             return None
+        
+    async def list_all_tags(
+        self,
+        __user__: dict = {},
+        __event_emitter__=None
+    ) -> str:
+        """
+        List all available tags in your Paperless-ngx instance.
+        
+        Useful for discovering what tags exist and their IDs for filtering searches.
+        
+        :return: List of all tags with their IDs and document counts
+        """
+        
+        if not self.valves.api_token:
+            return "Paperless-ngx API token not configured."
+        
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": "Retrieving all tags from Paperless...",
+                    "done": False
+                }
+            })
+        
+        try:
+            results = self._make_request('/api/tags/', params={'page_size': 1000})
+            
+            if not results.get('results'):
+                return "No tags found in your Paperless instance."
+            
+            tags = results['results']
+            
+            output_parts = [f"# Available Tags ({len(tags)} total)\n\n"]
+            
+            # Sort by document count (descending) then by name
+            tags_sorted = sorted(
+                tags,
+                key=lambda t: (-t.get('document_count', 0), t.get('name', '').lower())
+            )
+            
+            for tag in tags_sorted:
+                tag_id = tag['id']
+                tag_name = tag.get('name', 'Unnamed')
+                doc_count = tag.get('document_count', 0)
+                color = tag.get('color', '')
+                
+                output_parts.append(f"- **{tag_name}** (ID: {tag_id})")
+                output_parts.append(f" - {doc_count} document{'s' if doc_count != 1 else ''}")
+                if color:
+                    output_parts.append(f" - Color: {color}")
+                output_parts.append("\n")
+            
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": "Tags retrieved successfully",
+                        "done": True,
+                        "hidden": True
+                    }
+                })
+            
+            return "".join(output_parts)
+            
+        except Exception as e:
+            return f"Error retrieving tags: {str(e)}"
+
+    async def search_by_tags(
+        self,
+        tags: str = Field(
+            ...,
+            description="Tag names or IDs to search for (comma-separated). Use 'ALL' for documents with all tags, or list individual tags."
+        ),
+        match_all: bool = Field(
+            default=False,
+            description="If True, only return documents that have ALL specified tags. If False, return documents with ANY of the tags."
+        ),
+        __user__: dict = {},
+        __event_emitter__=None
+    ) -> str:
+        """
+        Search for documents by tag names or IDs.
+        
+        You can search by tag name (e.g., "invoice") or tag ID (e.g., "5").
+        Use comma separation for multiple tags.
+        
+        :param tags: Comma-separated tag names or IDs (e.g., "invoice,2024" or "5,12,18")
+        :param match_all: If True, documents must have all specified tags. If False, any tag matches.
+        :return: Documents matching the tag criteria
+        """
+        
+        if not self.valves.api_token:
+            return "Paperless-ngx API token not configured."
+        
+        user_valves = __user__.get("valves", self.UserValves())
+        if not isinstance(user_valves, self.UserValves):
+            user_valves = self.UserValves(**dict(user_valves))
+        
+        # Parse tags input
+        tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+        if not tag_list:
+            return "No tags specified. Please provide tag names or IDs."
+        
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": f"Searching for documents with tags: {', '.join(tag_list)}",
+                    "done": False
+                }
+            })
+        
+        try:
+            # First, resolve tag names to IDs if needed
+            tag_ids = []
+            all_tags = self._make_request('/api/tags/', params={'page_size': 1000})
+            
+            for tag_input in tag_list:
+                # Check if it's already a numeric ID
+                if tag_input.isdigit():
+                    tag_ids.append(tag_input)
+                else:
+                    # Search for tag by name (case-insensitive)
+                    matching_tag = None
+                    for tag in all_tags.get('results', []):
+                        if tag.get('name', '').lower() == tag_input.lower():
+                            matching_tag = tag
+                            break
+                    
+                    if matching_tag:
+                        tag_ids.append(str(matching_tag['id']))
+                    else:
+                        return f"Tag not found: '{tag_input}'. Use list_all_tags to see available tags."
+            
+            if not tag_ids:
+                return "No valid tags found."
+            
+            # Build search parameters
+            params = {'page_size': min(user_valves.max_results, 25)}
+            
+            if match_all:
+                # For match_all, use tags__id__all
+                params['tags__id__all'] = ','.join(tag_ids)
+                match_desc = "all tags"
+            else:
+                # For match_any, use tags__id__in
+                params['tags__id__in'] = ','.join(tag_ids)
+                match_desc = "any of these tags"
+            
+            # Search for documents
+            results = self._make_request('/api/documents/', params=params)
+            
+            if not results.get('results'):
+                return f"No documents found with {match_desc}: {', '.join(tag_list)}"
+            
+            documents = results['results']
+            total_count = results.get('count', len(documents))
+            
+            # Format results
+            output_parts = [f"# Documents with {match_desc}: {', '.join(tag_list)}\n\n"]
+            output_parts.append(f"Found {total_count} documents, showing top {len(documents)}:\n\n")
+            output_parts.append("---\n\n")
+            
+            for idx, doc in enumerate(documents, 1):
+                doc_id = doc['id']
+                
+                doc_output = self._format_document(doc, idx, user_valves)
+                output_parts.append(doc_output)
+                
+                # Retrieve full content if requested
+                if user_valves.include_content:
+                    content = self._get_document_content(doc_id)
+                    if content:
+                        if len(content) > self.valves.max_document_size:
+                            content = content[:self.valves.max_document_size] + "\n\n[Content truncated...]"
+                        output_parts.append(f"\n**Content:**\n\n{content}\n\n")
+                
+                # Emit citation
+                if __event_emitter__:
+                    doc_url = urljoin(self.valves.paperless_url, f"/documents/{doc_id}")
+                    await __event_emitter__({
+                        "type": "citation",
+                        "data": {
+                            "document": [doc_output + (f"\n\n{content}" if user_valves.include_content and content else "")],
+                            "metadata": [{
+                                "document_id": doc_id,
+                                "title": doc.get('title'),
+                                "tags": [t.get('name') for t in doc.get('tags', []) if isinstance(t, dict)]
+                            }],
+                            "source": {
+                                "name": f"#{doc_id}: {doc.get('title', 'Untitled')}",
+                                "url": doc_url
+                            }
+                        }
+                    })
+                
+                output_parts.append("---\n\n")
+            
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": f"Found {len(documents)} documents",
+                        "done": True,
+                        "hidden": True
+                    }
+                })
+            
+            return "".join(output_parts)
+            
+        except Exception as e:
+            return f"Error searching by tags: {str(e)}"
+
+    async def list_correspondents(
+        self,
+        __user__: dict = {},
+        __event_emitter__=None
+    ) -> str:
+        """
+        List all correspondents (document sources/senders) in your Paperless-ngx instance.
+        
+        Useful for finding correspondent IDs for filtered searches.
+        
+        :return: List of all correspondents with their IDs and document counts
+        """
+        
+        if not self.valves.api_token:
+            return "Paperless-ngx API token not configured."
+        
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": "Retrieving correspondents...",
+                    "done": False
+                }
+            })
+        
+        try:
+            results = self._make_request('/api/correspondents/', params={'page_size': 1000})
+            
+            if not results.get('results'):
+                return "No correspondents found in your Paperless instance."
+            
+            correspondents = results['results']
+            
+            output_parts = [f"# Available Correspondents ({len(correspondents)} total)\n\n"]
+            
+            # Sort by document count (descending) then by name
+            correspondents_sorted = sorted(
+                correspondents,
+                key=lambda c: (-c.get('document_count', 0), c.get('name', '').lower())
+            )
+            
+            for corr in correspondents_sorted:
+                corr_id = corr['id']
+                corr_name = corr.get('name', 'Unnamed')
+                doc_count = corr.get('document_count', 0)
+                
+                output_parts.append(f"- **{corr_name}** (ID: {corr_id})")
+                output_parts.append(f" - {doc_count} document{'s' if doc_count != 1 else ''}\n")
+            
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": "Correspondents retrieved",
+                        "done": True,
+                        "hidden": True
+                    }
+                })
+            
+            return "".join(output_parts)
+            
+        except Exception as e:
+            return f"Error retrieving correspondents: {str(e)}"
+
