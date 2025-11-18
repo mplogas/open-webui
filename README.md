@@ -85,7 +85,7 @@
 
 ## GitHub Reader
 
-## Core Functions
+## Exposed Tool Capabilities
 
 1. **`read_file`** - Read any file from a repository (public or private)
 2. **`list_repository_files`** - Browse repository file structure
