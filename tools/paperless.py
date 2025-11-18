@@ -3,7 +3,7 @@ title: Paperless-ngx Document Search
 author: Marc Plogas
 author_url: https://github.com/mplogas
 funding_url: https://github.com/sponsors/mplogas
-version: 1.0.0
+version: 1.0.1
 license: MIT
 description: Search and retrieve documents from your Paperless-ngx instance. Supports full-text search, filtering, and document content extraction for AI-powered summaries.
 requirements: requests>=2.31.0
@@ -957,4 +957,400 @@ class Tools:
             
         except Exception as e:
             return f"Error retrieving correspondents: {str(e)}"
+
+    async def list_document_types(
+        self,
+        __user__: dict = {},
+        __event_emitter__=None
+    ) -> str:
+        """
+        List all document types in your Paperless-ngx instance.
+        
+        Document types classify documents (e.g., Invoice, Receipt, Contract).
+        Useful for finding document type IDs for filtered searches.
+        
+        :return: List of all document types with their IDs and document counts
+        """
+        
+        if not self.valves.api_token:
+            return "Paperless-ngx API token not configured."
+        
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": "Retrieving document types...",
+                    "done": False
+                }
+            })
+        
+        try:
+            results = self._make_request('/api/document_types/', params={'page_size': 1000})
+            
+            if not results.get('results'):
+                return "No document types found in your Paperless instance."
+            
+            doc_types = results['results']
+            
+            output_parts = [f"# Available Document Types ({len(doc_types)} total)\n\n"]
+            
+            # Sort by document count (descending) then by name
+            doc_types_sorted = sorted(
+                doc_types,
+                key=lambda dt: (-dt.get('document_count', 0), dt.get('name', '').lower())
+            )
+            
+            for doc_type in doc_types_sorted:
+                type_id = doc_type['id']
+                type_name = doc_type.get('name', 'Unnamed')
+                doc_count = doc_type.get('document_count', 0)
+                
+                output_parts.append(f"- **{type_name}** (ID: {type_id})")
+                output_parts.append(f" - {doc_count} document{'s' if doc_count != 1 else ''}\n")
+            
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": "Document types retrieved",
+                        "done": True,
+                        "hidden": True
+                    }
+                })
+            
+            return "".join(output_parts)
+            
+        except Exception as e:
+            return f"Error retrieving document types: {str(e)}"
+
+    async def search_by_type_and_tags(
+        self,
+        document_type: str = Field(
+            ...,
+            description="Document type name or ID (e.g., 'invoice' or '5')"
+        ),
+        tags: Optional[str] = Field(
+            None,
+            description="Optional: Comma-separated tag names or IDs to further filter results"
+        ),
+        match_all_tags: bool = Field(
+            default=False,
+            description="If True and tags specified, documents must have ALL specified tags"
+        ),
+        query: Optional[str] = Field(
+            None,
+            description="Optional: Additional full-text search query"
+        ),
+        __user__: dict = {},
+        __event_emitter__=None
+    ) -> str:
+        """
+        Search for documents by document type, optionally filtered by tags and/or search query.
+        
+        Perfect for queries like "find all invoices with tag framework" or 
+        "show me all receipts from 2024".
+        
+        :param document_type: Document type name (e.g., "Invoice") or ID (e.g., "5")
+        :param tags: Optional comma-separated tags to filter (e.g., "framework,2025")
+        :param match_all_tags: If True, documents must have all specified tags
+        :param query: Optional additional search text
+        :return: Documents matching the criteria
+        """
+        
+        if not self.valves.api_token:
+            return "Paperless-ngx API token not configured."
+        
+        user_valves = __user__.get("valves", self.UserValves())
+        if not isinstance(user_valves, self.UserValves):
+            user_valves = self.UserValves(**dict(user_valves))
+        
+        # Resolve document type to ID
+        doc_type_id = None
+        if document_type.isdigit():
+            doc_type_id = document_type
+        else:
+            # Search for document type by name
+            all_types = self._make_request('/api/document_types/', params={'page_size': 1000})
+            for dt in all_types.get('results', []):
+                if dt.get('name', '').lower() == document_type.lower():
+                    doc_type_id = str(dt['id'])
+                    break
+            
+            if not doc_type_id:
+                return f"Document type not found: '{document_type}'. Use list_document_types to see available types."
+        
+        # Resolve tags to IDs if provided
+        tag_ids = []
+        if tags:
+            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+            all_tags = self._make_request('/api/tags/', params={'page_size': 1000})
+            
+            for tag_input in tag_list:
+                if tag_input.isdigit():
+                    tag_ids.append(tag_input)
+                else:
+                    matching_tag = None
+                    for tag in all_tags.get('results', []):
+                        if tag.get('name', '').lower() == tag_input.lower():
+                            matching_tag = tag
+                            break
+                    
+                    if matching_tag:
+                        tag_ids.append(str(matching_tag['id']))
+                    else:
+                        return f"Tag not found: '{tag_input}'. Use list_all_tags to see available tags."
+        
+        # Build search description
+        search_desc_parts = [f"type '{document_type}'"]
+        if tags:
+            tag_match = "all tags" if match_all_tags else "any tags"
+            search_desc_parts.append(f"with {tag_match}: {tags}")
+        if query:
+            search_desc_parts.append(f"matching '{query}'")
+        search_description = " ".join(search_desc_parts)
+        
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": f"Searching for documents with {search_description}",
+                    "done": False
+                }
+            })
+        
+        try:
+            # Build search parameters
+            params = {
+                'page_size': min(user_valves.max_results, 25),
+                'document_type__id': doc_type_id
+            }
+            
+            # Add tag filtering if specified
+            if tag_ids:
+                if match_all_tags:
+                    params['tags__id__all'] = ','.join(tag_ids)
+                else:
+                    params['tags__id__in'] = ','.join(tag_ids)
+            
+            # Add full-text query if specified
+            if query:
+                params['query'] = query
+            
+            # Execute search
+            results = self._make_request('/api/documents/', params=params)
+            
+            if not results.get('results'):
+                return f"No documents found with {search_description}"
+            
+            documents = results['results']
+            total_count = results.get('count', len(documents))
+            
+            # Format results
+            output_parts = [f"# Documents with {search_description}\n\n"]
+            output_parts.append(f"Found {total_count} documents, showing top {len(documents)}:\n\n")
+            output_parts.append("---\n\n")
+            
+            for idx, doc in enumerate(documents, 1):
+                doc_id = doc['id']
+                
+                doc_output = self._format_document(doc, idx, user_valves)
+                output_parts.append(doc_output)
+                
+                # Retrieve full content if requested
+                if user_valves.include_content:
+                    content = self._get_document_content(doc_id)
+                    if content:
+                        if len(content) > self.valves.max_document_size:
+                            content = content[:self.valves.max_document_size] + "\n\n[Content truncated...]"
+                        output_parts.append(f"\n**Content:**\n\n{content}\n\n")
+                
+                # Emit citation
+                if __event_emitter__:
+                    doc_url = urljoin(self.valves.paperless_url, f"/documents/{doc_id}")
+                    await __event_emitter__({
+                        "type": "citation",
+                        "data": {
+                            "document": [doc_output + (f"\n\n{content}" if user_valves.include_content and content else "")],
+                            "metadata": [{
+                                "document_id": doc_id,
+                                "title": doc.get('title'),
+                                "document_type": document_type,
+                                "tags": [t.get('name') for t in doc.get('tags', []) if isinstance(t, dict)]
+                            }],
+                            "source": {
+                                "name": f"#{doc_id}: {doc.get('title', 'Untitled')}",
+                                "url": doc_url
+                            }
+                        }
+                    })
+                
+                output_parts.append("---\n\n")
+            
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": f"Found {len(documents)} documents",
+                        "done": True,
+                        "hidden": True
+                    }
+                })
+            
+            return "".join(output_parts)
+            
+        except Exception as e:
+            return f"Error searching documents: {str(e)}"
+
+    async def search_by_correspondent(
+        self,
+        correspondent: str = Field(
+            ...,
+            description="Correspondent name or ID (e.g., 'ACME Corp' or '12')"
+        ),
+        tags: Optional[str] = Field(
+            None,
+            description="Optional: Comma-separated tag names or IDs to further filter"
+        ),
+        document_type: Optional[str] = Field(
+            None,
+            description="Optional: Document type name or ID to filter"
+        ),
+        query: Optional[str] = Field(
+            None,
+            description="Optional: Additional full-text search query"
+        ),
+        __user__: dict = {},
+        __event_emitter__=None
+    ) -> str:
+        """
+        Search for documents by correspondent (sender/source), with optional filters.
+        
+        Useful for finding all documents from a specific company or person.
+        Example: "Show me all invoices from Framework"
+        
+        :param correspondent: Correspondent name or ID
+        :param tags: Optional tags to filter
+        :param document_type: Optional document type to filter
+        :param query: Optional search text
+        :return: Documents from the specified correspondent
+        """
+        
+        if not self.valves.api_token:
+            return "Paperless-ngx API token not configured."
+        
+        user_valves = __user__.get("valves", self.UserValves())
+        if not isinstance(user_valves, self.UserValves):
+            user_valves = self.UserValves(**dict(user_valves))
+        
+        # Resolve correspondent to ID
+        corr_id = None
+        if correspondent.isdigit():
+            corr_id = correspondent
+        else:
+            all_corrs = self._make_request('/api/correspondents/', params={'page_size': 1000})
+            for corr in all_corrs.get('results', []):
+                if corr.get('name', '').lower() == correspondent.lower():
+                    corr_id = str(corr['id'])
+                    break
+            
+            if not corr_id:
+                return f"Correspondent not found: '{correspondent}'. Use list_correspondents to see available correspondents."
+        
+        # Build search parameters
+        params = {
+            'page_size': min(user_valves.max_results, 25),
+            'correspondent__id': corr_id
+        }
+        
+        search_desc = f"correspondent '{correspondent}'"
+        
+        # Add optional filters
+        if document_type:
+            doc_type_id = None
+            if document_type.isdigit():
+                doc_type_id = document_type
+            else:
+                all_types = self._make_request('/api/document_types/', params={'page_size': 1000})
+                for dt in all_types.get('results', []):
+                    if dt.get('name', '').lower() == document_type.lower():
+                        doc_type_id = str(dt['id'])
+                        break
+            
+            if doc_type_id:
+                params['document_type__id'] = doc_type_id
+                search_desc += f", type '{document_type}'"
+        
+        if tags:
+            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+            all_tags = self._make_request('/api/tags/', params={'page_size': 1000})
+            tag_ids = []
+            
+            for tag_input in tag_list:
+                if tag_input.isdigit():
+                    tag_ids.append(tag_input)
+                else:
+                    for tag in all_tags.get('results', []):
+                        if tag.get('name', '').lower() == tag_input.lower():
+                            tag_ids.append(str(tag['id']))
+                            break
+            
+            if tag_ids:
+                params['tags__id__in'] = ','.join(tag_ids)
+                search_desc += f", tags: {tags}"
+        
+        if query:
+            params['query'] = query
+            search_desc += f", matching '{query}'"
+        
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__({
+                "type": "status",
+                "data": {
+                    "description": f"Searching for documents from {search_desc}",
+                    "done": False
+                }
+            })
+        
+        try:
+            results = self._make_request('/api/documents/', params=params)
+            
+            if not results.get('results'):
+                return f"No documents found from {search_desc}"
+            
+            documents = results['results']
+            total_count = results.get('count', len(documents))
+            
+            output_parts = [f"# Documents from {search_desc}\n\n"]
+            output_parts.append(f"Found {total_count} documents, showing top {len(documents)}:\n\n")
+            output_parts.append("---\n\n")
+            
+            for idx, doc in enumerate(documents, 1):
+                doc_id = doc['id']
+                
+                doc_output = self._format_document(doc, idx, user_valves)
+                output_parts.append(doc_output)
+                
+                if user_valves.include_content:
+                    content = self._get_document_content(doc_id)
+                    if content:
+                        if len(content) > self.valves.max_document_size:
+                            content = content[:self.valves.max_document_size] + "\n\n[Content truncated...]"
+                        output_parts.append(f"\n**Content:**\n\n{content}\n\n")
+                
+                output_parts.append("---\n\n")
+            
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__({
+                    "type": "status",
+                    "data": {
+                        "description": "Search completed",
+                        "done": True,
+                        "hidden": True
+                    }
+                })
+            
+            return "".join(output_parts)
+            
+        except Exception as e:
+            return f"Error searching by correspondent: {str(e)}"
 
