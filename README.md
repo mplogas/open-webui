@@ -16,7 +16,7 @@
 - **Automatic citations**: Includes source URL, title, author, date metadata
 - **Configurable**: User controls extraction method, link inclusion, metadata display
 
-### USage
+### Usage
 
 **Single page:**
 ```
@@ -85,7 +85,7 @@
 
 ## GitHub Reader
 
-## Exposed Tool Capabilities
+### Exposed Tool Capabilities
 
 1. **`read_file`** - Read any file from a repository (public or private)
 2. **`list_repository_files`** - Browse repository file structure
@@ -101,7 +101,7 @@
 13. **`trigger_workflow`** - Trigger a workflow_dispatch event
 14. **`cancel_workflow_run`** - Cancel a running workflow
 
-## Key Features
+### Features
 
 - **Public & private repos**: Works with any repository you have access to
 - **Syntax highlighting**: Automatic language detection for code display
@@ -114,7 +114,7 @@
 - **Filtering**: Filter workflow runs by status, branch, or specific workflow
 - **Automatic citations**: Links back to source files and gists on GitHub 
 
-## Usage Examples
+### Usage Examples
 
 **Read files:**
 ```
