@@ -91,6 +91,12 @@
 2. **`list_repository_files`** - Browse repository file structure
 3. **`search_code`** - Search for code across GitHub
 4. **`get_repository_info`** - Get repository metadata and statistics
+5. **`list_my_gists`** - List all your gists
+6. **`get_gist`** - Read a gist by ID (with syntax highlighting)
+7. **`create_gist`** - Create a new gist (public or secret)
+8. **`update_gist`** - Update existing gist content
+9. **`delete_gist`** - Delete a gist
+
 
 ## Key Features
 
@@ -139,11 +145,42 @@
 "Find all API endpoints in my-backend/server and list them"
 ```
 
+**List your gists:**
+```
+"Show me my recent gists"
+"List my GitHub gists"
+```
+
+**Read a gist:**
+```
+"Get gist abc123def456"
+"Show me the content of gist abc123"
+```
+
+**Create a gist:**
+```
+"Create a public gist with description 'Python helper functions' and files: helpers.py=def hello(): print('hi')|||test.py=print('test')"
+```
+
+**Update a gist:**
+```
+"Update gist abc123 with new description 'Updated helpers'"
+"Update gist abc123 files: helpers.py=def hello(): print('updated')"
+```
+
+**Delete a gist:**
+```
+"Delete gist abc123"
+```
+
+The file format for `files` parameter is: `filename1.ext=content1|||filename2.ext=content2` - this allows multiple files per gist!
+
+
 ## Setup
 
 1. **For public repos:** Works immediately, no configuration needed
 2. **For private repos:** 
    - Go to GitHub Settings → Developer settings → Personal access tokens
    - Click "Generate new token (classic)"
-   - Select scopes: `repo` (full control of private repositories)
+   - Select scopes: `repo` (full control of private repositories), `gists` (full control of gists) and `workflow` 
    - Copy token and add to tool settings

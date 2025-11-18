@@ -1,16 +1,25 @@
 """
+
 title: GitHub Code Reader
+
 author: Your Name
+
 author_url: https://github.com/yourusername
-version: 1.0.0
+
+version: 1.1.0
+
 license: MIT
-description: Read code from GitHub repositories including private repos. Browse files and analyze code with AI.
+
+description: Read code from GitHub repositories including private repos. Browse files and analyze code with AI. Create and manage gists.
+
 requirements: requests>=2.31.0
+
 required_open_webui_version: 0.4.0
+
 """
 
 import base64
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import quote
 
 import requests
@@ -48,13 +57,35 @@ class Tools:
             headers["Authorization"] = f"Bearer {self.valves.github_token}"
         return headers
 
-    def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Any:
+    def _make_request(
+        self,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        method: str = "GET",
+        data: Optional[Dict] = None,
+    ) -> Any:
         url = f"{self.base_url}{endpoint}"
         try:
-            response = requests.get(
-                url, headers=self._get_headers(), params=params, timeout=30
-            )
+            if method == "GET":
+                response = requests.get(
+                    url, headers=self._get_headers(), params=params, timeout=30
+                )
+            elif method == "POST":
+                response = requests.post(
+                    url, headers=self._get_headers(), json=data, timeout=30
+                )
+            elif method == "PATCH":
+                response = requests.patch(
+                    url, headers=self._get_headers(), json=data, timeout=30
+                )
+            elif method == "DELETE":
+                response = requests.delete(url, headers=self._get_headers(), timeout=30)
+            else:
+                raise Exception(f"Unsupported HTTP method: {method}")
+
             response.raise_for_status()
+            if method == "DELETE":
+                return {"status": "deleted"}
             return response.json()
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 401:
@@ -97,6 +128,29 @@ class Tools:
             size /= 1024.0
         return f"{size:.1f} TB"
 
+    def _render_code_block(
+        self,
+        content: str,
+        lang: str,
+        show_line_numbers: bool,
+        syntax_highlighting: bool,
+    ) -> str:
+        fence_lang = lang if syntax_highlighting and lang else ""
+        block: List[str] = [f"```{fence_lang}\n"]
+
+        if show_line_numbers:
+            lines = content.split("\n")
+            width = len(str(len(lines))) or 1
+            for idx, line in enumerate(lines, 1):
+                block.append(f"{idx:>{width}} | {line}\n")
+        else:
+            block.append(content)
+            if not content.endswith("\n"):
+                block.append("\n")
+
+        block.append("```\n")
+        return "".join(block)
+
     async def read_file(
         self,
         repo: str = Field(..., description="Repository in format owner/repo"),
@@ -106,7 +160,6 @@ class Tools:
         __event_emitter__=None,
     ) -> str:
         """Read a file from a GitHub repository"""
-
         user_valves = __user__.get("valves", self.UserValves())
         if not isinstance(user_valves, self.UserValves):
             user_valves = self.UserValves()
@@ -159,23 +212,14 @@ class Tools:
                 output.append(f"**Branch:** {branch}\n")
             output.append(f"**Size:** {file_size} bytes\n\n")
             output.append("---\n\n")
-
-            if user_valves.syntax_highlighting and lang:
-                output.append(f"```{lang}\n")
-            else:
-                output.append("```\n")
-
-            if user_valves.show_line_numbers:
-                lines = content.split("\n")
-                width = len(str(len(lines)))
-                for i, line in enumerate(lines, 1):
-                    output.append(f"{i:>{width}} | {line}\n")
-            else:
-                output.append(content)
-                if not content.endswith("\n"):
-                    output.append("\n")
-
-            output.append("```\n")
+            output.append(
+                self._render_code_block(
+                    content,
+                    lang,
+                    user_valves.show_line_numbers,
+                    user_valves.syntax_highlighting,
+                )
+            )
 
             if __event_emitter__:
                 file_url = f"https://github.com/{repo}/blob/{branch or self.valves.default_branch}/{file_path}"
@@ -221,7 +265,6 @@ class Tools:
         __event_emitter__=None,
     ) -> str:
         """List files in a repository directory"""
-
         if __event_emitter__ and self.valves.enable_status_updates:
             await __event_emitter__(
                 {
@@ -289,7 +332,6 @@ class Tools:
         __event_emitter__=None,
     ) -> str:
         """Get repository information"""
-
         if __event_emitter__ and self.valves.enable_status_updates:
             await __event_emitter__(
                 {
@@ -349,6 +391,339 @@ class Tools:
                 )
 
             return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def list_my_gists(
+        self,
+        limit: int = Field(default=10, description="Number of gists to list"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """List your gists"""
+        if not self.valves.github_token:
+            return "GitHub token required to list your gists"
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Fetching your gists", "done": False},
+                }
+            )
+
+        try:
+            gists = self._make_request("/gists", params={"per_page": min(limit, 100)})
+
+            if not gists:
+                return "No gists found"
+
+            output = []
+            output.append(f"# Your Gists ({len(gists)} shown)\n\n")
+
+            for idx, gist in enumerate(gists, 1):
+                gist_id = gist["id"]
+                description = gist.get("description") or "No description"
+                public = "Public" if gist.get("public") else "Secret"
+                created = gist.get("created_at", "Unknown")
+
+                files = list(gist.get("files", {}).keys())
+                file_list = ", ".join(files[:3])
+                if len(files) > 3:
+                    file_list += f" (+{len(files)-3} more)"
+
+                output.append(f"## {idx}. {description}\n\n")
+                output.append(f"**ID:** `{gist_id}`\n")
+                output.append(f"**Visibility:** {public}\n")
+                output.append(f"**Files:** {file_list}\n")
+                output.append(f"**Created:** {created}\n")
+                output.append(f"**URL:** {gist.get('html_url', '')}\n\n")
+                output.append("---\n\n")
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Done", "done": True, "hidden": True},
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def get_gist(
+        self,
+        gist_id: str = Field(..., description="Gist ID"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Get a gist by ID and read its content"""
+        user_valves = __user__.get("valves", self.UserValves())
+        if not isinstance(user_valves, self.UserValves):
+            user_valves = self.UserValves()
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": f"Fetching gist {gist_id}", "done": False},
+                }
+            )
+
+        try:
+            gist = self._make_request(f"/gists/{gist_id}")
+
+            output = []
+            description = gist.get("description") or "Untitled Gist"
+            output.append(f"# {description}\n\n")
+            output.append(f"**ID:** `{gist['id']}`\n")
+            output.append(
+                f"**Visibility:** {'Public' if gist.get('public') else 'Secret'}\n"
+            )
+            output.append(
+                f"**Owner:** {gist.get('owner', {}).get('login', 'Anonymous')}\n"
+            )
+            output.append(f"**Created:** {gist.get('created_at', 'Unknown')}\n")
+            output.append(f"**Updated:** {gist.get('updated_at', 'Unknown')}\n")
+            output.append(f"**URL:** {gist.get('html_url', '')}\n\n")
+            output.append("---\n\n")
+
+            files = gist.get("files", {})
+            for filename, file_data in files.items():
+                content = file_data.get("content", "")
+                lang = file_data.get("language", "").lower()
+                size = file_data.get("size", 0)
+
+                output.append(f"## File: {filename}\n\n")
+                output.append(f"**Size:** {size} bytes\n")
+                if lang:
+                    output.append(f"**Language:** {lang}\n")
+                output.append("\n")
+                output.append(
+                    self._render_code_block(
+                        content,
+                        lang,
+                        user_valves.show_line_numbers,
+                        user_valves.syntax_highlighting,
+                    )
+                )
+                output.append("\n")
+
+            if __event_emitter__:
+                await __event_emitter__(
+                    {
+                        "type": "citation",
+                        "data": {
+                            "document": ["".join(output)],
+                            "metadata": [{"source": "GitHub Gist", "gist_id": gist_id}],
+                            "source": {
+                                "name": f"Gist: {description}",
+                                "url": gist.get("html_url", ""),
+                            },
+                        },
+                    }
+                )
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Done", "done": True, "hidden": True},
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def create_gist(
+        self,
+        description: str = Field(..., description="Gist description"),
+        files: str = Field(
+            ...,
+            description="Files in format: filename1.ext=content1|||filename2.ext=content2",
+        ),
+        public: bool = Field(default=True, description="Make gist public"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Create a new gist"""
+        if not self.valves.github_token:
+            return "GitHub token required to create gists"
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Creating gist", "done": False},
+                }
+            )
+
+        try:
+            files_dict = {}
+            file_entries = files.split("|||")
+
+            for entry in file_entries:
+                entry = entry.strip()
+                if "=" not in entry:
+                    return f"Invalid file format. Use: filename.ext=content|||filename2.ext=content2"
+
+                filename, content = entry.split("=", 1)
+                filename = filename.strip()
+                content = content.strip()
+
+                if not filename:
+                    return "Filename cannot be empty"
+
+                files_dict[filename] = {"content": content}
+
+            if not files_dict:
+                return "At least one file is required"
+
+            data = {"description": description, "public": public, "files": files_dict}
+
+            gist = self._make_request("/gists", method="POST", data=data)
+
+            output = []
+            output.append("# Gist Created Successfully!\n\n")
+            output.append(f"**ID:** `{gist['id']}`\n")
+            output.append(f"**Description:** {description}\n")
+            output.append(f"**Visibility:** {'Public' if public else 'Secret'}\n")
+            output.append(f"**Files:** {', '.join(files_dict.keys())}\n")
+            output.append(f"\n**URL:** {gist.get('html_url', '')}\n")
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Gist created",
+                            "done": True,
+                            "hidden": True,
+                        },
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def update_gist(
+        self,
+        gist_id: str = Field(..., description="Gist ID to update"),
+        description: Optional[str] = Field(None, description="New description"),
+        files: Optional[str] = Field(
+            None,
+            description="Files to update: filename.ext=newcontent|||filename2.ext=content2",
+        ),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Update an existing gist"""
+        if not self.valves.github_token:
+            return "GitHub token required to update gists"
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Updating gist", "done": False},
+                }
+            )
+
+        try:
+            data = {}
+
+            if description:
+                data["description"] = description
+
+            if files:
+                files_dict = {}
+                file_entries = files.split("|||")
+
+                for entry in file_entries:
+                    entry = entry.strip()
+                    if "=" not in entry:
+                        return f"Invalid file format. Use: filename.ext=content|||filename2.ext=content2"
+
+                    filename, content = entry.split("=", 1)
+                    filename = filename.strip()
+                    content = content.strip()
+
+                    files_dict[filename] = {"content": content}
+
+                data["files"] = files_dict
+
+            if not data:
+                return "Nothing to update. Provide description or files"
+
+            gist = self._make_request(f"/gists/{gist_id}", method="PATCH", data=data)
+
+            output = []
+            output.append("# Gist Updated Successfully!\n\n")
+            output.append(f"**ID:** `{gist['id']}`\n")
+            output.append(
+                f"**Description:** {gist.get('description', 'No description')}\n"
+            )
+            output.append(f"**Updated:** {gist.get('updated_at', 'Unknown')}\n")
+            output.append(f"\n**URL:** {gist.get('html_url', '')}\n")
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Gist updated",
+                            "done": True,
+                            "hidden": True,
+                        },
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def delete_gist(
+        self,
+        gist_id: str = Field(..., description="Gist ID to delete"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Delete a gist"""
+        if not self.valves.github_token:
+            return "GitHub token required to delete gists"
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Deleting gist", "done": False},
+                }
+            )
+
+        try:
+            self._make_request(f"/gists/{gist_id}", method="DELETE")
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Gist deleted",
+                            "done": True,
+                            "hidden": True,
+                        },
+                    }
+                )
+
+            return f"Gist {gist_id} deleted successfully"
 
         except Exception as e:
             return f"Error: {str(e)}"
