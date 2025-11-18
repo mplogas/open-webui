@@ -89,24 +89,30 @@
 
 1. **`read_file`** - Read any file from a repository (public or private)
 2. **`list_repository_files`** - Browse repository file structure
-3. **`search_code`** - Search for code across GitHub
 4. **`get_repository_info`** - Get repository metadata and statistics
 5. **`list_my_gists`** - List all your gists
 6. **`get_gist`** - Read a gist by ID (with syntax highlighting)
 7. **`create_gist`** - Create a new gist (public or secret)
 8. **`update_gist`** - Update existing gist content
 9. **`delete_gist`** - Delete a gist
-
+10. **`list_workflows`** - List all workflows in a repository
+11. **`list_workflow_runs`** - List workflow runs with filtering (status, branch, workflow)
+12. **`get_workflow_run`** - Get detailed status of a specific run (includes jobs)
+13. **`trigger_workflow`** - Trigger a workflow_dispatch event
+14. **`cancel_workflow_run`** - Cancel a running workflow
 
 ## Key Features
 
 - **Public & private repos**: Works with any repository you have access to
 - **Syntax highlighting**: Automatic language detection for code display
-- **Line numbers**: Optional line numbering for code review
-- **Tree browsing**: Recursive or non-recursive directory listing
 - **Code search**: Find specific functions, patterns, or implementations
-- **Large file handling**: Size limits to prevent memory issues
-- **Automatic citations**: Links back to source files on GitHub
+- **Gist management**: Full CRUD operations for gists (create, read, update, delete)
+- **Multi-file gists**: Support for gists with multiple files
+- **Workflow monitoring**: Check status of GitHub Actions runs
+- **Workflow triggering**: Start workflows with custom inputs via workflow_dispatch
+- **Job details**: View individual job status within workflow runs
+- **Filtering**: Filter workflow runs by status, branch, or specific workflow
+- **Automatic citations**: Links back to source files and gists on GitHub 
 
 ## Usage Examples
 
@@ -161,6 +167,7 @@
 ```
 "Create a public gist with description 'Python helper functions' and files: helpers.py=def hello(): print('hi')|||test.py=print('test')"
 ```
+*Note: The file format for `files` parameter is: `filename1.ext=content1|||filename2.ext=content2` - this allows multiple files per gist!*
 
 **Update a gist:**
 ```
@@ -173,8 +180,35 @@
 "Delete gist abc123"
 ```
 
-The file format for `files` parameter is: `filename1.ext=content1|||filename2.ext=content2` - this allows multiple files per gist!
+**List all workflows:**
+```
+"Show me all workflows in myorg/myrepo"
+"List workflows in my repository"
+```
 
+**Check workflow runs:**
+```
+"Show me recent workflow runs for myorg/myrepo"
+"List failed workflow runs in myorg/myrepo"
+"Show workflow runs for ci.yml on main branch"
+```
+
+**Get specific run details:**
+```
+"Get details for workflow run 12345678 in myorg/myrepo"
+"Show me the status of run #12345678"
+```
+
+**Trigger a workflow:**
+```
+"Trigger workflow ci.yml in myorg/myrepo on main branch"
+"Run workflow deploy.yml with inputs: environment=production|||version=1.2.3"
+```
+
+**Cancel a run:**
+```
+"Cancel workflow run 12345678 in myorg/myrepo"
+```
 
 ## Setup
 

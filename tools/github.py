@@ -1,25 +1,18 @@
 """
-
-title: GitHub Code Reader
-
+title: GitHub Connector
 author: Your Name
-
-author_url: https://github.com/yourusername
-
+author_url: https://github.com/mplogas
 version: 1.1.0
-
 license: MIT
-
-description: Read code from GitHub repositories including private repos. Browse files and analyze code with AI. Create and manage gists.
-
+description: Read code from GitHub repositories including private repos. Manage Gists and control workflows.
 requirements: requests>=2.31.0
-
 required_open_webui_version: 0.4.0
 
 """
 
 import base64
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import requests
@@ -128,6 +121,54 @@ class Tools:
             size /= 1024.0
         return f"{size:.1f} TB"
 
+    def _split_repo(self, repo: str) -> Optional[Tuple[str, str]]:
+        parts = [part.strip() for part in repo.split("/") if part.strip()]
+        if len(parts) != 2:
+            return None
+        return parts[0], parts[1]
+
+    def _format_workflow_status(
+        self, status: Optional[str], conclusion: Optional[str] = None
+    ) -> str:
+        status_text = (status or "unknown").replace("_", " ").strip()
+        status_text = status_text.capitalize() if status_text else "Unknown"
+
+        if conclusion and conclusion not in {"", "N/A"}:
+            conclusion_text = conclusion.replace("_", " ").strip()
+            if conclusion_text:
+                status_text = f"{status_text} ({conclusion_text})"
+
+        return status_text
+
+    def _parse_workflow_inputs(self, inputs: Optional[str]) -> Dict[str, str]:
+        if not inputs:
+            return {}
+
+        inputs = inputs.strip()
+        if not inputs:
+            return {}
+
+        if inputs.startswith("{"):
+            try:
+                parsed = json.loads(inputs)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON for inputs: {exc}") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("Workflow inputs JSON must be an object")
+            return {str(key): str(value) for key, value in parsed.items()}
+
+        entries: Dict[str, str] = {}
+        for entry in inputs.split("|||"):
+            segment = entry.strip()
+            if not segment:
+                continue
+            if "=" not in segment:
+                raise ValueError(f"Invalid input format segment: '{segment}'")
+            key, value = segment.split("=", 1)
+            entries[key.strip()] = value.strip()
+
+        return entries
+
     def _render_code_block(
         self,
         content: str,
@@ -173,11 +214,11 @@ class Tools:
             )
 
         try:
-            parts = repo.split("/")
-            if len(parts) != 2:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
                 return "Invalid repo format. Use owner/repo"
 
-            owner, repo_name = parts
+            owner, repo_name = owner_repo
             endpoint = f"/repos/{owner}/{repo_name}/contents/{quote(file_path)}"
             params = {"ref": branch} if branch else {}
 
@@ -274,11 +315,11 @@ class Tools:
             )
 
         try:
-            parts = repo.split("/")
-            if len(parts) != 2:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
                 return "Invalid repo format. Use owner/repo"
 
-            owner, repo_name = parts
+            owner, repo_name = owner_repo
             endpoint = (
                 f"/repos/{owner}/{repo_name}/contents/{quote(path) if path else ''}"
             )
@@ -341,11 +382,11 @@ class Tools:
             )
 
         try:
-            parts = repo.split("/")
-            if len(parts) != 2:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
                 return "Invalid repo format. Use owner/repo"
 
-            owner, repo_name = parts
+            owner, repo_name = owner_repo
             repo_data = self._make_request(f"/repos/{owner}/{repo_name}")
 
             output = []
@@ -724,6 +765,379 @@ class Tools:
                 )
 
             return f"Gist {gist_id} deleted successfully"
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def list_workflow_runs(
+        self,
+        repo: str = Field(..., description="Repository in format owner/repo"),
+        workflow_id: Optional[str] = Field(
+            None, description="Workflow ID or filename (e.g., 'ci.yml')"
+        ),
+        branch: Optional[str] = Field(None, description="Filter by branch"),
+        status: Optional[str] = Field(
+            None,
+            description="Filter by status: completed, action_required, cancelled, failure, neutral, skipped, stale, success, timed_out, in_progress, queued, requested, waiting, pending",
+        ),
+        limit: int = Field(default=10, description="Number of runs to list"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """List workflow runs for a repository"""
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Fetching workflow runs", "done": False},
+                }
+            )
+
+        try:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
+                return "Invalid repo format. Use owner/repo"
+
+            owner, repo_name = owner_repo
+
+            if workflow_id:
+                endpoint = (
+                    f"/repos/{owner}/{repo_name}/actions/workflows/{workflow_id}/runs"
+                )
+            else:
+                endpoint = f"/repos/{owner}/{repo_name}/actions/runs"
+
+            params = {"per_page": min(limit, 100)}
+            if branch:
+                params["branch"] = branch
+            if status:
+                params["status"] = status
+
+            data = self._make_request(endpoint, params)
+            runs = data.get("workflow_runs", [])
+
+            if not runs:
+                return "No workflow runs found"
+
+            output = []
+            output.append(f"# Workflow Runs: {repo}\n\n")
+            if workflow_id:
+                output.append(f"**Workflow:** {workflow_id}\n")
+            if branch:
+                output.append(f"**Branch:** {branch}\n")
+            if status:
+                output.append(f"**Status Filter:** {status}\n")
+            output.append(f"\nShowing {len(runs)} run(s):\n\n")
+
+            for idx, run in enumerate(runs, 1):
+                run_id = run.get("id")
+                name = run.get("name", "Unknown")
+                run_number = run.get("run_number", "N/A")
+                status_val = run.get("status")
+                conclusion = run.get("conclusion")
+                branch_name = run.get("head_branch", "N/A")
+                commit = (run.get("head_sha") or "N/A")[:7]
+                created = run.get("created_at", "Unknown")
+                updated = run.get("updated_at", "Unknown")
+
+                status_label = self._format_workflow_status(status_val, conclusion)
+
+                output.append(f"## {idx}. {name} #{run_number}\n\n")
+                output.append(f"**Run ID:** `{run_id}`\n")
+                output.append(f"**Status:** {status_label}\n")
+                if conclusion:
+                    output.append(f"**Conclusion:** {conclusion}\n")
+                output.append(f"**Branch:** {branch_name}\n")
+                output.append(f"**Commit:** `{commit}`\n")
+                output.append(f"**Created:** {created}\n")
+                output.append(f"**Updated:** {updated}\n")
+                output.append(f"**URL:** {run.get('html_url', '')}\n\n")
+                output.append("---\n\n")
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Done", "done": True, "hidden": True},
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def get_workflow_run(
+        self,
+        repo: str = Field(..., description="Repository in format owner/repo"),
+        run_id: int = Field(..., description="Workflow run ID"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Get detailed information about a specific workflow run"""
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": f"Fetching run #{run_id}", "done": False},
+                }
+            )
+
+        try:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
+                return "Invalid repo format. Use owner/repo"
+
+            owner, repo_name = owner_repo
+            endpoint = f"/repos/{owner}/{repo_name}/actions/runs/{run_id}"
+
+            run = self._make_request(endpoint)
+
+            output = []
+            output.append(
+                f"# {run.get('name', 'Workflow Run')} #{run.get('run_number', run_id)}\n\n"
+            )
+
+            status_val = run.get("status")
+            conclusion = run.get("conclusion")
+            status_label = self._format_workflow_status(status_val, conclusion)
+
+            output.append(f"**Status:** {status_label}\n")
+            if conclusion:
+                output.append(f"**Conclusion:** {conclusion}\n")
+            output.append(f"**Run ID:** `{run.get('id')}`\n")
+            output.append(f"**Run Number:** #{run.get('run_number', 'N/A')}\n")
+            output.append(f"**Workflow:** {run.get('path', 'N/A')}\n")
+            output.append(f"**Branch:** {run.get('head_branch', 'N/A')}\n")
+            output.append(f"**Commit:** `{run.get('head_sha', 'N/A')[:7]}`\n")
+            output.append(f"**Event:** {run.get('event', 'N/A')}\n")
+            output.append(
+                f"**Actor:** {run.get('actor', {}).get('login', 'Unknown')}\n"
+            )
+            output.append(f"**Created:** {run.get('created_at', 'Unknown')}\n")
+            output.append(f"**Updated:** {run.get('updated_at', 'Unknown')}\n")
+            output.append(f"\n**URL:** {run.get('html_url', '')}\n\n")
+
+            jobs_endpoint = f"/repos/{owner}/{repo_name}/actions/runs/{run_id}/jobs"
+            try:
+                jobs_data = self._make_request(jobs_endpoint)
+                jobs = jobs_data.get("jobs", [])
+
+                if jobs:
+                    output.append("## Jobs\n\n")
+                    for job in jobs:
+                        job_status = job.get("status")
+                        job_conclusion = job.get("conclusion")
+                        job_label = self._format_workflow_status(
+                            job_status, job_conclusion
+                        )
+
+                        output.append(f"### {job.get('name', 'Unnamed Job')}\n\n")
+                        output.append(f"**Status:** {job_label}\n")
+                        if job_conclusion:
+                            output.append(f"**Conclusion:** {job_conclusion}\n")
+                        output.append(
+                            f"**Started:** {job.get('started_at', 'Not started')}\n"
+                        )
+                        output.append(
+                            f"**Completed:** {job.get('completed_at', 'Not completed')}\n\n"
+                        )
+            except Exception:
+                pass
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Done", "done": True, "hidden": True},
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def trigger_workflow(
+        self,
+        repo: str = Field(..., description="Repository in format owner/repo"),
+        workflow_id: str = Field(
+            ..., description="Workflow ID or filename (e.g., 'ci.yml')"
+        ),
+        ref: str = Field(
+            default="main", description="Git ref (branch or tag) to run workflow on"
+        ),
+        inputs: Optional[str] = Field(
+            None,
+            description="Workflow inputs as JSON string or key=value|||key2=value2 format",
+        ),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Trigger a workflow_dispatch event to run a workflow"""
+        if not self.valves.github_token:
+            return "GitHub token required to trigger workflows"
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Triggering workflow", "done": False},
+                }
+            )
+
+        try:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
+                return "Invalid repo format. Use owner/repo"
+
+            owner, repo_name = owner_repo
+            endpoint = (
+                f"/repos/{owner}/{repo_name}/actions/workflows/{workflow_id}/dispatches"
+            )
+
+            data = {"ref": ref}
+
+            try:
+                inputs_dict = self._parse_workflow_inputs(inputs)
+            except ValueError as exc:
+                return f"Invalid workflow inputs: {exc}"
+
+            if inputs_dict:
+                data["inputs"] = inputs_dict
+
+            self._make_request(endpoint, method="POST", data=data)
+
+            output = []
+            output.append("# Workflow Triggered Successfully!\n\n")
+            output.append(f"**Repository:** {repo}\n")
+            output.append(f"**Workflow:** {workflow_id}\n")
+            output.append(f"**Ref:** {ref}\n")
+            if inputs:
+                output.append(f"**Inputs:** Provided\n")
+            output.append(
+                f"\n**Note:** The workflow run has been queued. Use `list_workflow_runs` to check its status.\n"
+            )
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Workflow triggered",
+                            "done": True,
+                            "hidden": True,
+                        },
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def list_workflows(
+        self,
+        repo: str = Field(..., description="Repository in format owner/repo"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """List all workflows in a repository"""
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Fetching workflows", "done": False},
+                }
+            )
+
+        try:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
+                return "Invalid repo format. Use owner/repo"
+
+            owner, repo_name = owner_repo
+            endpoint = f"/repos/{owner}/{repo_name}/actions/workflows"
+
+            data = self._make_request(endpoint)
+            workflows = data.get("workflows", [])
+
+            if not workflows:
+                return "No workflows found in this repository"
+
+            output = []
+            output.append(f"# Workflows in {repo}\n\n")
+            output.append(f"Total: {len(workflows)} workflow(s)\n\n")
+
+            for idx, workflow in enumerate(workflows, 1):
+                workflow_id = workflow.get("id")
+                name = workflow.get("name", "Unnamed")
+                path = workflow.get("path", "N/A")
+                state = workflow.get("state", "unknown")
+                state_label = state.replace("_", " ").title() if state else "Unknown"
+
+                output.append(f"## {idx}. {name}\n\n")
+                output.append(f"**ID:** `{workflow_id}`\n")
+                output.append(f"**Path:** `{path}`\n")
+                output.append(f"**State:** {state_label}\n")
+                output.append(f"**URL:** {workflow.get('html_url', '')}\n\n")
+                output.append("---\n\n")
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {"description": "Done", "done": True, "hidden": True},
+                    }
+                )
+
+            return "".join(output)
+
+        except Exception as e:
+            return f"Error: {str(e)}"
+
+    async def cancel_workflow_run(
+        self,
+        repo: str = Field(..., description="Repository in format owner/repo"),
+        run_id: int = Field(..., description="Workflow run ID to cancel"),
+        __user__: dict = {},
+        __event_emitter__=None,
+    ) -> str:
+        """Cancel a workflow run"""
+        if not self.valves.github_token:
+            return "GitHub token required to cancel workflow runs"
+
+        if __event_emitter__ and self.valves.enable_status_updates:
+            await __event_emitter__(
+                {
+                    "type": "status",
+                    "data": {"description": "Cancelling workflow run", "done": False},
+                }
+            )
+
+        try:
+            owner_repo = self._split_repo(repo)
+            if not owner_repo:
+                return "Invalid repo format. Use owner/repo"
+
+            owner, repo_name = owner_repo
+            endpoint = f"/repos/{owner}/{repo_name}/actions/runs/{run_id}/cancel"
+
+            self._make_request(endpoint, method="POST", data={})
+
+            if __event_emitter__ and self.valves.enable_status_updates:
+                await __event_emitter__(
+                    {
+                        "type": "status",
+                        "data": {
+                            "description": "Run cancelled",
+                            "done": True,
+                            "hidden": True,
+                        },
+                    }
+                )
+
+            return f"Workflow run #{run_id} has been cancelled successfully"
 
         except Exception as e:
             return f"Error: {str(e)}"
